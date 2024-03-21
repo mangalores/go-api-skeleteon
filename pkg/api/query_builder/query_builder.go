@@ -1,8 +1,7 @@
-package api
+package query_builder
 
 import (
 	"errors"
-	"github.com/labstack/echo/v4"
 	"github.com/mangalores/go-api-skeleton/pkg/db"
 	"github.com/mangalores/go-api-skeleton/pkg/utils"
 	"net/url"
@@ -54,17 +53,15 @@ func (o *Operator) TransformValue(values []string) interface{} {
 }
 
 type QueryBuilder struct {
-	operators    map[string]*Operator
-	allowedEmbed map[string]db.Preload
-	isSlice      bool
-	defaultSort  []db.Sort
-	presetFilter []db.Filter
-	preload      []db.Preload
-	model        interface{}
-
-	loadQueryParams bool
-	loadPathParams  bool
-	loadPreloads    bool
+	operators          map[string]*Operator
+	allowedEmbed       map[string]db.Preload
+	isSlice            bool
+	defaultSort        []db.Sort
+	presetFilter       []db.Filter
+	preload            []db.Preload
+	model              interface{}
+	loadPreloads       bool
+	appendedParameters url.Values
 }
 
 func NewQueryBuilder(model interface{}) *QueryBuilder {
@@ -81,10 +78,8 @@ func (b *QueryBuilder) Reset(model interface{}) *QueryBuilder {
 	b.defaultSort = []db.Sort{}
 	b.presetFilter = []db.Filter{}
 	b.preload = []db.Preload{}
-
-	b.loadQueryParams = true
-	b.loadPathParams = true
 	b.loadPreloads = false
+	b.appendedParameters = make(url.Values)
 
 	return b
 }
@@ -105,14 +100,6 @@ func (b *QueryBuilder) RegisterOperator(identifier string, operator string, fn f
 
 func (b *QueryBuilder) SetSlice(flag bool) {
 	b.isSlice = flag
-}
-
-func (b *QueryBuilder) SetParsePathParams(flag bool) {
-	b.loadPathParams = flag
-}
-
-func (b *QueryBuilder) SetParseQueryParams(flag bool) {
-	b.loadQueryParams = flag
 }
 
 func (b *QueryBuilder) SetParseEmbedding(flag bool) {
@@ -151,20 +138,29 @@ func (b *QueryBuilder) AddAllowedEmbed(name string, associationName string) {
 	b.allowedEmbed[name] = db.Preload{Name: associationName}
 }
 
-func (b *QueryBuilder) Build(ctx echo.Context) (query db.QueryObject, err error) {
-	simpleQuery, err := b.buildQuery(ctx)
+func (b *QueryBuilder) AddParameter(name string, values ...string) {
+	b.appendedParameters[name] = values
+}
+
+func (b *QueryBuilder) Build(inputParams url.Values) (query db.QueryObject, err error) {
+	params := make(url.Values)
+	for name, values := range inputParams {
+		params[name] = values
+	}
+
+	simpleQuery, err := b.buildQuery(params)
 	if err != nil {
 		return
 	}
 	query = simpleQuery
 
-	filteredQuery, err := b.buildFilterQuery(ctx, simpleQuery)
+	filteredQuery, err := b.buildFilterQuery(params, simpleQuery)
 	if err != nil || !b.isSlice {
 		query = filteredQuery
 		return
 	}
 
-	query, err = b.buildSlicedQuery(ctx, filteredQuery)
+	query, err = b.buildSlicedQuery(params, filteredQuery)
 	if err != nil {
 		return
 	}
@@ -172,7 +168,7 @@ func (b *QueryBuilder) Build(ctx echo.Context) (query db.QueryObject, err error)
 	return
 }
 
-func (b *QueryBuilder) buildQuery(ctx echo.Context) (*db.Query, error) {
+func (b *QueryBuilder) buildQuery(params url.Values) (*db.Query, error) {
 	q := &db.Query{}
 
 	if b.model == nil {
@@ -180,7 +176,7 @@ func (b *QueryBuilder) buildQuery(ctx echo.Context) (*db.Query, error) {
 	}
 	q.SetModel(b.model)
 
-	preloads, err := b.buildPreloads(ctx)
+	preloads, err := b.buildPreloads(params)
 	if len(preloads) > 0 {
 		q.SetPreloads(&preloads)
 	}
@@ -188,11 +184,11 @@ func (b *QueryBuilder) buildQuery(ctx echo.Context) (*db.Query, error) {
 	return q, err
 }
 
-func (b *QueryBuilder) buildFilterQuery(ctx echo.Context, query *db.Query) (*db.FilterQuery, error) {
+func (b *QueryBuilder) buildFilterQuery(params url.Values, query *db.Query) (*db.FilterQuery, error) {
 	filters := make([]db.Filter, 0)
 	filterQuery := &db.FilterQuery{Query: *query}
 
-	paramFilters, err := b.buildFilters(b.fetchParameters(ctx), acceptedFilterFields(b.model))
+	paramFilters, err := b.buildFilters(b.extendParameters(params), acceptedFilterFields(b.model))
 	if err != nil {
 		return filterQuery, err
 	}
@@ -204,18 +200,18 @@ func (b *QueryBuilder) buildFilterQuery(ctx echo.Context, query *db.Query) (*db.
 	return filterQuery, err
 }
 
-func (b *QueryBuilder) buildSlicedQuery(ctx echo.Context, query *db.FilterQuery) (*db.CollectionQuery, error) {
+func (b *QueryBuilder) buildSlicedQuery(params url.Values, query *db.FilterQuery) (*db.CollectionQuery, error) {
 	cq := &db.CollectionQuery{FilterQuery: *query}
 
 	if reflect.TypeOf(utils.StripPointer(b.model)).Kind() != reflect.Slice {
 		return cq, errors.New("for collections specified destination object must be of type slice")
 	}
-	slice, err := b.buildSlice(ctx)
+	slice, err := b.buildSlice(params)
 	if err != nil {
 		return cq, err
 	}
 
-	slice.Sort, err = extractSortParamValues(ctx.QueryParams(), acceptedFilterFields(b.model))
+	slice.Sort, err = extractSortParamValues(params, acceptedFilterFields(b.model))
 	if err != nil {
 		return cq, err
 	}
@@ -228,22 +224,10 @@ func (b *QueryBuilder) buildSlicedQuery(ctx echo.Context, query *db.FilterQuery)
 	return cq, err
 }
 
-func (b *QueryBuilder) fetchParameters(ctx echo.Context) url.Values {
-	params := make(url.Values)
-
-	if b.loadQueryParams {
-		for name, value := range ctx.QueryParams() {
-			params[name] = value
-		}
-	}
-
-	// path parameter take precedence
-	if b.loadPathParams {
-		pathNames := ctx.ParamNames()
-		pathValues := ctx.ParamValues()
-		for i, n := range pathNames {
-			params[n] = []string{pathValues[i]}
-		}
+func (b *QueryBuilder) extendParameters(params url.Values) url.Values {
+	// appended parameters take precedence
+	for name, values := range b.appendedParameters {
+		params[name] = values
 	}
 
 	return params
@@ -291,8 +275,7 @@ func (b *QueryBuilder) buildFilters(params url.Values, fields map[string]string)
 	return filters, nil
 }
 
-func (b *QueryBuilder) buildPreloads(ctx echo.Context) ([]db.Preload, error) {
-	params := ctx.QueryParams()
+func (b *QueryBuilder) buildPreloads(params url.Values) ([]db.Preload, error) {
 	if list := params[embedField]; len(list) > 0 {
 		for _, name := range list {
 			preload, ok := b.allowedEmbed[name]
@@ -307,16 +290,16 @@ func (b *QueryBuilder) buildPreloads(ctx echo.Context) ([]db.Preload, error) {
 	return b.preload, nil
 }
 
-func (b *QueryBuilder) buildSlice(ctx echo.Context) (slice *db.Slice, err error) {
+func (b *QueryBuilder) buildSlice(params url.Values) (slice *db.Slice, err error) {
 	offset := defaultOffset
 	limit := defaultLimit
 
-	offset, err = extractNumericParamValue(ctx, offsetField)
+	offset, err = extractNumericParamValue(params, offsetField)
 	if err != nil {
 		return &db.Slice{Offset: defaultOffset, Limit: defaultLimit}, NewInvalidParamValueErr(offsetField, true)
 	}
 
-	limit, err = extractNumericParamValue(ctx, limitField)
+	limit, err = extractNumericParamValue(params, limitField)
 	if err != nil {
 		return &db.Slice{Offset: defaultOffset, Limit: defaultLimit}, NewInvalidParamValueErr(limitField, true)
 	}

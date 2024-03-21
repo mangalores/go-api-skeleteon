@@ -1,4 +1,4 @@
-package api
+package query_builder
 
 import (
 	"github.com/mangalores/go-api-skeleton/pkg/db"

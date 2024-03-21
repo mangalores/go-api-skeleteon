@@ -1,4 +1,4 @@
-package api
+package query_builder
 
 import (
 	"fmt"
@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/labstack/echo/v4"
 	"github.com/mangalores/go-api-skeleton/pkg/db"
 )
 
@@ -55,9 +54,9 @@ func mapDirection(v string) (direction db.Direction, ok bool) {
 		return "", false
 	}
 }
-func extractNumericParamValue(ctx echo.Context, name string) (value int, err error) {
-	if l := ctx.QueryParam(name); l != "" {
-		value, err = strconv.Atoi(l)
+func extractNumericParamValue(params url.Values, name string) (value int, err error) {
+	if l, ok := params[name]; ok {
+		value, err = strconv.Atoi(l[0])
 		if err != nil {
 			return value, NewInvalidParamValueErr(name, true)
 		}

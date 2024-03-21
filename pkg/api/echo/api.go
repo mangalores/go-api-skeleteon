@@ -1,4 +1,4 @@
-package api
+package echo
 
 import (
 	"net/http"

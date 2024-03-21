@@ -1,4 +1,4 @@
-package api
+package response_handler
 
 import (
 	"fmt"

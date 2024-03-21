@@ -1,4 +1,4 @@
-package api
+package response_handler
 
 import (
 	"fmt"
@@ -10,7 +10,7 @@ import (
 )
 
 type MappingFunc func(e interface{}) (interface{}, error)
-type PathFunc func(ctx echo.Context, e interface{}) (string, error)
+type LinkResolver func(ctx echo.Context, e interface{}) (string, error)
 
 type ResponseHandler struct {
 	mappings map[string]MappingFunc
@@ -26,17 +26,17 @@ func (r *ResponseHandler) Register(i interface{}, m MappingFunc) {
 	r.mappings[reflect.TypeOf(i).String()] = m
 }
 
-func (r *ResponseHandler) Handle(ctx echo.Context, query db.QueryObject) interface{} {
+func (r *ResponseHandler) Handle(basePath string, query db.QueryObject) interface{} {
 	switch query.(type) {
 	case db.SlicedQueryObject:
-		return r.mapCollection(ctx, query.(db.SlicedQueryObject))
+		return r.mapCollection(basePath, query.(db.SlicedQueryObject))
 	default:
-		return r.mapSimpleQuery(ctx, query.(db.QueryObject))
+		return r.mapSimpleQuery(query.(db.QueryObject))
 	}
 
 }
 
-func (r *ResponseHandler) mapSimpleQuery(ctx echo.Context, query db.QueryObject) interface{} {
+func (r *ResponseHandler) mapSimpleQuery(query db.QueryObject) interface{} {
 	println(fmt.Sprintf("%T", query.Result()))
 	result := utils.StripPointer(query.Result())
 	mapFunc, err := r.getMap(result)
@@ -58,7 +58,7 @@ func (r *ResponseHandler) mapSimpleQuery(ctx echo.Context, query db.QueryObject)
 	return mapped
 }
 
-func (r *ResponseHandler) mapCollection(ctx echo.Context, query db.SlicedQueryObject) interface{} {
+func (r *ResponseHandler) mapCollection(basePath string, query db.SlicedQueryObject) interface{} {
 	result := utils.StripPointer(query.Result())
 	m, err := r.getMap(result)
 	if err != nil {
@@ -66,7 +66,7 @@ func (r *ResponseHandler) mapCollection(ctx echo.Context, query db.SlicedQueryOb
 		return nil
 	}
 
-	return NewCollection(ctx, query, m)
+	return NewCollection(basePath, query, m)
 }
 
 func (r *ResponseHandler) getMap(i interface{}) (MappingFunc, error) {
@@ -98,7 +98,7 @@ func GenerateSelfLink(path string) LinkOpts {
 	return LinkOpts{Links: links}
 }
 
-func NewCollection(ctx echo.Context, query db.SlicedQueryObject, mapFunc MappingFunc) *Collection {
+func NewCollection(basePath string, query db.SlicedQueryObject, mapFunc MappingFunc) *Collection {
 	result := utils.StripPointer(query.Result())
 	items, err := mapFunc(result)
 	if err != nil {
@@ -113,7 +113,7 @@ func NewCollection(ctx echo.Context, query db.SlicedQueryObject, mapFunc Mapping
 	}
 
 	if sel := query.Slice(); sel != nil {
-		collection.LinkOpts = GenerateCollectionLinks(sel, ctx.Request().URL.Path)
+		collection.LinkOpts = GenerateCollectionLinks(sel, basePath)
 		collection.Metadata = CollectionOpts{
 			Offset: sel.Offset,
 			Limit:  sel.Limit,
